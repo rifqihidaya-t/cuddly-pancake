@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Colors
+green() { printf "\033[32m%s\033[0m\n" "$*"; }
+yellow() { printf "\033[33m%s\033[0m\n" "$*"; }
+
+require_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Please run as root: sudo $0"
+    exit 1
+  fi
+}
+
+detect_sudo_user_home() {
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    eval echo "~$SUDO_USER"
+  else
+    echo "$HOME"
+  fi
+}
+
+main() {
+  require_root
+  USER_HOME="$(detect_sudo_user_home)"
+  USER_NAME="${SUDO_USER:-$USER}"
+
+  green "1) Updating APT indexes and upgrading existing packages..."
+  apt update
+  DEBIAN_FRONTEND=noninteractive apt -y upgrade
+
+  green "2) Enable multiverse and refresh package lists (needed for restricted extras)..."
+  add-apt-repository -y multiverse || true
+  apt update
+
+  green "3) Preseed Microsoft fonts EULA to make ubuntu-restricted-extras noninteractive..."
+  echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections
+  echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula seen true"   | debconf-set-selections
+
+  green "4) Install core CLI tools, dev utilities, and desktop basics..."
+  DEBIAN_FRONTEND=noninteractive apt install -y \
+    build-essential \
+    git curl jq \
+    tmux htop btop fzf ripgrep \
+    bat eza ffmpeg \
+    synaptic gnome-tweaks \
+    ubuntu-restricted-extras \
+    openssh-server
+
+  green "5) Configure bat -> batcat convenience symlink for the user..."
+  sudo -u "$USER_NAME" mkdir -p "$USER_HOME/.local/bin"
+  if [ ! -e "$USER_HOME/.local/bin/bat" ]; then
+    sudo -u "$USER_NAME" ln -s /usr/bin/batcat "$USER_HOME/.local/bin/bat" || true
+  fi
+  # Ensure ~/.local/bin is on PATH for bash users
+  if [ -f "$USER_HOME/.bashrc" ] && ! sudo -u "$USER_NAME" grep -q 'export PATH="$HOME/.local/bin' "$USER_HOME/.bashrc"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$USER_HOME/.bashrc"
+  fi
+
+  green "6) Install and enable unattended-upgrades for automatic security updates..."
+  DEBIAN_FRONTEND=noninteractive apt install -y unattended-upgrades
+  # Ensure periodic updates + unattended upgrades are enabled
+  AUTO_FILE="/etc/apt/apt.conf.d/20auto-upgrades"
+  cat > "$AUTO_FILE" << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+
+  # Optionally keep defaults in 50unattended-upgrades; they already include security pocket.
+  # You can further customize Allowed-Origins later if needed.
+
+  systemctl enable --now unattended-upgrades.service || true
+
+  green "7) Refresh snaps (optional) ..."
+  if command -v snap >/dev/null 2>&1; then
+    snap refresh || true
+  fi
+
+  yellow "Done."
+  echo "Notes:"
+  echo "- ubuntu-restricted-extras installed with fonts EULA preaccepted for noninteractive run[6][9][18]."
+  echo "- bat is available as batcat; a user-local 'bat' symlink was added to ~/.local/bin[7][13][19]."
+  echo "- Automatic security updates enabled via unattended-upgrades[5][11][14]."
+  echo "- Reboot is not required unless kernel or core libs were upgraded."
+}
+
+main "$@"
